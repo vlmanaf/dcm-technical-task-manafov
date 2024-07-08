@@ -1,10 +1,13 @@
+import os
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
 from django.urls import reverse
+from pyfakefs.fake_filesystem_unittest import TestCaseMixin
 from rest_framework import status
 
-from api.models import TestRunRequest, TestEnvironment, TestFilePath
+from api.models import TestEnvironment, TestFilePath, TestRunRequest
 
 
 class TestTestRunRequestAPIView(TestCase):
@@ -152,3 +155,59 @@ class TestAssetsAPIView(TestCase):
         response = self.client.get(self.url)
         self.assertEqual(status.HTTP_200_OK, response.status_code)
         self.assertEqual({'k': 'v'}, response.json())
+
+
+class TestUploadTestFileAPIView(TestCaseMixin, TestCase):
+
+    def setUp(self) -> None:
+        self.setUpPyfakefs()
+        self.path1 = TestFilePath.objects.create(path='path1')
+        self.path2 = TestFilePath.objects.create(path='path2')
+        self.url = reverse('test_file_req')
+        with open('path2', 'w') as f:
+            f.write('EXISTS')
+        self.file_name = 'file.py'
+        self.uploaded_file = SimpleUploadedFile('file.py', b'content')
+
+    def test_upload_testfile_success(self):
+        file_path = self.file_name
+        assert not TestFilePath.objects.filter(path=self.file_name).exists()
+        response = self.client.post(self.url, data={'test_file': self.uploaded_file, 'upload_dir': ''})
+        self.assertEqual(status.HTTP_201_CREATED, response.status_code)
+        self.assertEqual(response.json(), {'path': 'file.py'})
+        self.assertTrue(os.path.exists(file_path))
+        with open(file_path) as f:
+            self.assertEqual('content', f.read())
+        self.assertTrue(TestFilePath.objects.filter(path=file_path).exists())
+
+    def test_upload_testfile_exists(self):
+        file_path = 'path2'
+        uploaded_file = SimpleUploadedFile(file_path, b'content')
+        response = self.client.post(self.url, data={'test_file': uploaded_file, 'upload_dir': ''})
+        self.assertEqual(status.HTTP_201_CREATED, response.status_code)
+        self.assertTrue(response.json()['path'].startswith('path2_'))
+        self.assertTrue(os.path.exists(file_path))
+        with open(file_path) as f:
+            self.assertEqual('EXISTS', f.read())
+        self.assertTrue(TestFilePath.objects.filter(path=file_path).exists())
+
+    def test_upload_testfile_success_mkdir(self):
+        upload_dir = 'new_dir'
+        file_path = 'new_dir/file.py'
+        response = self.client.post(self.url, data={'test_file': self.uploaded_file, 'upload_dir': upload_dir})
+        self.assertEqual(status.HTTP_201_CREATED, response.status_code)
+        self.assertEqual(response.json(), {'path': 'new_dir/file.py'})
+        self.assertTrue(os.path.exists(file_path))
+        with open(file_path) as f:
+            self.assertEqual('content', f.read())
+        self.assertTrue(TestFilePath.objects.filter(path=file_path).exists())
+
+    @override_settings(MEDIA_ROOT='/code')
+    def test_upload_testfile_validation_error(self):
+        file_path = 'file.py'
+        uploaded_file = SimpleUploadedFile(file_path, b'content')
+        response = self.client.post(self.url, data={'test_file': uploaded_file, 'upload_dir': '/dev/'})
+        self.assertEqual(status.HTTP_400_BAD_REQUEST, response.status_code)
+        self.assertEqual(response.json(), ["Access denied for destination '/dev/file.py'"])
+        self.assertFalse(os.path.exists(file_path))
+        self.assertFalse(TestFilePath.objects.filter(path=file_path).exists())
